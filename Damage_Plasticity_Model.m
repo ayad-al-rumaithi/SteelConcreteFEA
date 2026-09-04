@@ -1,317 +1,518 @@
 function [Material_State,D]=Damage_Plasticity_Model(Material,Material_State,e)
 
-%Notes: 
-%1-Denominator-layout notation was used for matrix calculus
-%2-d_f_d_s= TT'*d_f_d_S is total derivative while d_d_f_d_d_s=TT'*d_d_f_d_d_S*TT is not total because principal stress derivative with respect to direction is zero and
-%second order derivative does not equal to zero. This causes the tangent stiffness matrix not to be exact. It can be solved by calculating d_d_f_d_d_s directly
-%3-Sometimes when both Rankine and Drucker-Prager yield functions are activated, the solution does not converge and then only one of them converge after assigning them.
+% STAGE 1:
+% Unified Abaqus Concrete Damaged Plasticity (Lubliner-Lee-Fenves)
+% yield surface with Abaqus-type hyperbolic non-associated flow potential.
+%
+% Stage-1 scope:
+%   1) Rankine + Drucker-Prager multi-surface formulation is replaced by
+%      ONE yield surface.
+%   2) One cumulative plastic multiplier/internal variable k is used.
+%   3) Existing hardening/softening and damage equations are deliberately
+%      NOT replaced yet.
+%   4) Existing function input/output interface is retained.
+%      For backward compatibility, Material_State.k_DP and k_RK are both
+%      kept and synchronized to the single k.
+%   5) Additional CDP parameters are constants below and are NOT added to
+%      the Material input structure.
+%
+% Important:
+%   The present stage keeps the original scalar damage variable d and its
+%   evolution exactly in the final part of the original routine. The
+%   MC2010 compression/tension laws and two damage variables are Stage 2+.
 
-%Material Properties
-%--------------------
-E=Material.E;
-v=Material.v;
-f_t=Material.f_t;
-g_f=Material.g_f;
-f_c=Material.f_c;
-f_c2=Material.f_c2;
+% Additional unified-CDP parameters (assumed constants for Stage 1)
+% -------------------------------------------------------------------------
+psi_deg = 35.0;       % Dilation angle, degrees
+ecc      = 0.10;      % Abaqus meridional flow-potential eccentricity
+Kc       = 2.0/3.0;   % Deviatoric-plane parameter, 0.5 < Kc <= 1.0
 
-beta=sqrt(3)*(f_c2-f_c)/(2*f_c2-f_c);
-Hp=f_c2*f_c/(sqrt(3)*(2*f_c2-f_c));
+% Numerical safeguards
+tol_q    = 1.0e-12;
+tol_F   = 1.0e-10;
+tol_R   = 1.0e-10;
+maxIter  = 100;
 
-%Values from Previous Increment
-%-------------------------------
-e_i=Material_State.e;
-s_i=Material_State.s_eff;   %Effective stress
-k_RK_i=Material_State.k_RK;
-k_DP_i=Material_State.k_DP;
-k_D=Material_State.k_D;     %Doesn't require k_D_i because it is not in return mapping algorithm iterations  
+% Material properties
+% --------------------
+E   = Material.E;
+v   = Material.v;
+f_t = Material.f_t;
+g_f = Material.g_f;
+f_c = Material.f_c;
+f_c2= Material.f_c2;
 
-%Constitutive law of elastic material
-%----------------------------------------
+% The original code used these quantities for its DP hardening surface.
+% They are retained because the original material interface is retained.
+beta_old = sqrt(3)*(f_c2-f_c)/(2*f_c2-f_c);
+Hp       = f_c2*f_c/(sqrt(3)*(2*f_c2-f_c)); %#ok<NASGU>
 
-E_hat=E/((1-2*v)*(1+v));
-G=1/2*E/(1+v);
+% Previous increment
+% -------------------
+e_i = Material_State.e;
+s_i = Material_State.s_eff;       % effective stress used by return mapping
+k_D = Material_State.k_D;
 
-D_e= [E_hat*(1-v) E_hat*v     E_hat*v     0 0 0;...
-      E_hat*v     E_hat*(1-v) E_hat*v     0 0 0;... 
-      E_hat*v     E_hat*v     E_hat*(1-v) 0 0 0;... 
-      0           0           0           G 0 0;...
-      0           0           0           0 G 0;...
-      0           0           0           0 0 G];
-
-%Strain Increment and Elastic Stress
-%-----------------------------------
-d_e=e-e_i;
-s_e=s_i+D_e*d_e;
-
-%Initial Solution
-%------------------
-i=0;
-s=s_e;
-d_k_RK=0;
-d_k_DP=0;
-
-k_RK=k_RK_i;
-k_DP=k_DP_i;
-
-while 1
-
-Converged=0;
-
-i=i+1;
-
-%Principal Stress
-%------------------
-[T,S] = eig([s(1) s(4) s(6);...
-             s(4) s(2) s(5);...
-             s(6) s(5) s(3)]);
-S=diag(S);                 
-[S,I]=sort(S,'descend'); T=T(:,I);         
-
-TT=[T(1,1)^2 T(2,1)^2 T(3,1)^2 2*T(1,1)*T(2,1) 2*T(2,1)*T(3,1) 2*T(3,1)*T(1,1);...             %Transformation of Stress Matrix
-    T(1,2)^2 T(2,2)^2 T(3,2)^2 2*T(1,2)*T(2,2) 2*T(2,2)*T(3,2) 2*T(3,2)*T(1,2);...
-    T(1,3)^2 T(2,3)^2 T(3,3)^2 2*T(1,3)*T(2,3) 2*T(2,3)*T(3,3) 2*T(3,3)*T(1,3)];
-
-%Calculate yield function and its derivatives (Rankine)
-%--------------------------------------------------------
-s_h_RK=f_t+0*k_RK;                                                                             %Hardening Law (No Hardening)
-h_RK=0;                                                                                        %Hardening Law Derivative
-d_f_RK_d_k=-h_RK;
-f_RK=0;
-if S(1)>0 && S(2)<=0 && S(3)<=0
-f_RK=S(1)-s_h_RK;                                                                              %Rankine Yield Surface
- 
-d_f_RK_d_S=[1;...                                                                              %Yield function derivative
-            0;...
-            0];
-d_d_f_RK_d_d_S=[0 0 0;...
-                0 0 0;...
-                0 0 0];    
-        
-elseif S(1)>0 && S(2)>0 && S(3)<=0
-f_RK=sqrt(S(1)^2+S(2)^2)-s_h_RK;                                                               %Rankine Yield Surface
-
-d_f_RK_d_S=[S(1)/(S(1)^2 + S(2)^2)^(1/2);...                                                   %Yield function derivative
-            S(2)/(S(1)^2 + S(2)^2)^(1/2);...
-            0];
-d_d_f_RK_d_d_S=[ 1/(S(1)^2 + S(2)^2)^(1/2) - S(1)^2/(S(1)^2 + S(2)^2)^(3/2),  -(S(1)*S(2))/(S(1)^2 + S(2)^2)^(3/2),0;...
-                  -(S(1)*S(2))/(S(1)^2 + S(2)^2)^(3/2), 1/(S(1)^2 + S(2)^2)^(1/2) - S(2)^2/(S(1)^2 + S(2)^2)^(3/2),0;...
-                0 0 0];               
-
-elseif S(1)>0 && S(2)>0 && S(3)>0 
-f_RK=sqrt(S(1)^2+S(2)^2+S(3)^2)-s_h_RK;                                                        %Rankine Yield Surface 
-
-d_f_RK_d_S=[S(1)/(S(1)^2 + S(2)^2+ S(3)^2)^(1/2);...                                           %Yield function derivative
-            S(2)/(S(1)^2 + S(2)^2+ S(3)^2)^(1/2);...
-            S(3)/(S(1)^2 + S(2)^2+ S(3)^2)^(1/2)]; 
-d_d_f_RK_d_d_S=[ 1/(S(1)^2 + S(2)^2 + S(3)^2)^(1/2) - S(1)^2/(S(1)^2 + S(2)^2 + S(3)^2)^(3/2),            -(S(1)*S(2))/(S(1)^2 + S(2)^2 + S(3)^2)^(3/2),                                 -(S(1)*S(3))/(S(1)^2 + S(2)^2 + S(3)^2)^(3/2);...
-                            -(S(1)*S(2))/(S(1)^2 + S(2)^2 + S(3)^2)^(3/2), 1/(S(1)^2 + S(2)^2 + S(3)^2)^(1/2) - S(2)^2/(S(1)^2 + S(2)^2 + S(3)^2)^(3/2),                                 -(S(2)*S(3))/(S(1)^2 + S(2)^2 + S(3)^2)^(3/2);...
-                            -(S(1)*S(3))/(S(1)^2 + S(2)^2 + S(3)^2)^(3/2),                                -(S(2)*S(3))/(S(1)^2 + S(2)^2 + S(3)^2)^(3/2), 1/(S(1)^2 + S(2)^2 + S(3)^2)^(1/2) - S(3)^2/(S(1)^2 + S(2)^2 + S(3)^2)^(3/2)];      
-
+% Backward-compatible storage:
+% one unified internal variable k is represented by both old fields.
+if isfield(Material_State,'k_DP')
+    k_i = Material_State.k_DP;
+elseif isfield(Material_State,'k_RK')
+    k_i = Material_State.k_RK;
+else
+    k_i = 0;
 end
 
-%Calculate yield function and its derivatives (Drucker-Prager)
-%--------------------------------------------------------------
-s_h_DP=Hp+0*k_DP;                                                                                        %Hardening Law (No Hardening)
-h_DP=0;                                                                                                  %Hardening Law Derivative  
-d_f_DP_d_k=-h_DP;
-f_DP=beta/3*(S(1)+S(2)+S(3))+1/sqrt(3)*sqrt(S(1)^2+S(2)^2+S(3)^2-S(1)*S(2)-S(2)*S(3)-S(3)*S(1))-s_h_DP;  %Drucker-Prager Yield Surface
+% Elastic constitutive matrix
+% ----------------------------
+E_hat = E/((1-2*v)*(1+v));
+G     = 0.5*E/(1+v);
 
-d_f_DP_d_S=[beta/3 - (3^(1/2)*(S(2) - 2*S(1) + S(3)))/(6*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2));...%Yield function derivative
-            beta/3 - (3^(1/2)*(S(1) - 2*S(2) + S(3)))/(6*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2));...
-            beta/3 - (3^(1/2)*(S(1) + S(2) - 2*S(3)))/(6*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2))];
-d_d_f_DP_d_d_S=[   3^(1/2)/(3*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2)) - (3^(1/2)*(S(2) - 2*S(1) + S(3))^2)/(12*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(3/2)), - 3^(1/2)/(6*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2)) - (3^(1/2)*(S(1) - 2*S(2) + S(3))*(S(2) - 2*S(1) + S(3)))/(12*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(3/2)), - 3^(1/2)/(6*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2)) - (3^(1/2)*(S(1) + S(2) - 2*S(3))*(S(2) - 2*S(1) + S(3)))/(12*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(3/2));...
-           - 3^(1/2)/(6*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2)) - (3^(1/2)*(S(1) - 2*S(2) + S(3))*(S(2) - 2*S(1) + S(3)))/(12*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(3/2)),                  3^(1/2)/(3*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2)) - (3^(1/2)*(S(1) - 2*S(2) + S(3))^2)/(12*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(3/2)), - 3^(1/2)/(6*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2)) - (3^(1/2)*(S(1) + S(2) - 2*S(3))*(S(1) - 2*S(2) + S(3)))/(12*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(3/2));...
-           - 3^(1/2)/(6*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2)) - (3^(1/2)*(S(1) + S(2) - 2*S(3))*(S(2) - 2*S(1) + S(3)))/(12*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(3/2)), - 3^(1/2)/(6*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2)) - (3^(1/2)*(S(1) + S(2) - 2*S(3))*(S(1) - 2*S(2) + S(3)))/(12*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(3/2)),                  3^(1/2)/(3*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(1/2)) - (3^(1/2)*(S(1) + S(2) - 2*S(3))^2)/(12*(S(1)^2 - S(1)*S(2) - S(1)*S(3) + S(2)^2 - S(2)*S(3) + S(3)^2)^(3/2))];      
-                                                                      
-if i==1; Yieldfn=[]; end   
-if i==1 && f_RK<=0 && f_DP<=0; break; end
-if i==1001 || i==2001 || i==3001 || i==4001 || i==5001 || i==6001  %Restart all the iterations and try new yield functions (for i>4000 the yield functions are fixed)
-s=s_e;
-d_k_RK=0;
-d_k_DP=0;
-k_RK=k_RK_i;
-k_DP=k_DP_i;
-if i==1001 || i==4001; Yieldfn=[]; Yieldfn{1}='RK'; continue; end
-if i==2001 || i==5001; Yieldfn=[]; Yieldfn{1}='DP'; continue; end
-if i==3001 || i==6001; Yieldfn=[]; Yieldfn{1}='RK'; Yieldfn{2}='DP'; continue; end
-end
+D_e = [E_hat*(1-v) E_hat*v     E_hat*v     0 0 0;...
+       E_hat*v     E_hat*(1-v) E_hat*v     0 0 0;...
+       E_hat*v     E_hat*v     E_hat*(1-v) 0 0 0;...
+       0           0           0           G 0 0;...
+       0           0           0           0 G 0;...
+       0           0           0           0 0 G];
 
-%Set of Initial Active Yield Functions
-%--------------------------------------
-if i==1   
-c=0;
-if f_RK>0 
-c=c+1;    
-Yieldfn_i{c}='RK';
-end
-if f_DP>0 
-c=c+1;    
-Yieldfn_i{c}='DP';
-end
-Yieldfn=Yieldfn_i;    %Set of Active Yield Functions 
-end
+% Elastic predictor
+% ------------------
+d_e = e-e_i;
+s_e = s_i + D_e*d_e;
 
-while 1
-%Use only Active Yield Functions
-%--------------------------------
-c=0;
-f=[]; h=[]; d_f_d_s=[]; d_d_f_d_d_s=[]; d_f_d_k=[]; k_i=[]; d_k=[];
-if not(isempty(find(contains(Yieldfn,'RK'), 1))) 
-c=c+1;
-f(c,1)=f_RK;
-h(c,c)=h_RK;
-d_f_RK_d_s=TT'*d_f_RK_d_S;
-d_d_f_RK_d_d_s=TT'*d_d_f_RK_d_d_S*TT;
-d_f_d_s(:,c)=d_f_RK_d_s;
-d_d_f_d_d_s{c}=d_d_f_RK_d_d_s;
-d_f_d_k(c,c)=d_f_RK_d_k;
-k_i(c,1)=k_RK_i;
-d_k(c,1)=d_k_RK;
-end
-if not(isempty(find(contains(Yieldfn,'DP'), 1)))   
-c=c+1;
-f(c,1)=f_DP;
-h(c,c)=h_DP;
-d_f_DP_d_s=TT'*d_f_DP_d_S;
-d_d_f_DP_d_d_s=TT'*d_d_f_DP_d_d_S*TT;
-d_f_d_s(:,c)=d_f_DP_d_s;
-d_d_f_d_d_s{c}=d_d_f_DP_d_d_s;
-d_f_d_k(c,c)=d_f_DP_d_k;
-k_i(c,1)=k_DP_i;
-d_k(c,1)=d_k_DP;
-end              
+% Abaqus CDP parameters
+% ----------------------
+rb0_rc0  = f_c2/f_c;    % sigma_b0 / sigma_c0
+alpha = (rb0_rc0-1)/(2*rb0_rc0-1);
+gamma = 3*(1-Kc)/(2*Kc-1);
+psi   = psi_deg*pi/180;
 
-%Calculate Risidue
-%-------------------
-r1=D_e\(s-s_e);
-for j=1:1:c
-r1=r1+d_k(j)*d_f_d_s(:,j);    
-end
-r2=f;
-r=[r1 ; r2];
+% Stage 1: strengths are kept constant. Their evolution will be replaced
+% later by the MC2010 compression/tension laws.
+sigma_t = f_t;
+sigma_c = f_c;
 
-if norm(r1)<10^(-6)*f_t && norm(r2)<10^(-6)*f_t; Converged=1; break; end  
+% Abaqus beta parameter
+beta = (sigma_c/sigma_t)*(1-alpha) - (1+alpha);
 
-%Calculate Jacobian
-%--------------------
-J11=inv(D_e);
-for j=1:1:c
-J11=J11+d_k(j)*d_d_f_d_d_s{j};    
-end
-J12=d_f_d_s;   
-J21=d_f_d_s';  
-J22=d_f_d_k;
-J=[J11 J12 ; J21 J22];
+% Trial yield check
+% ------------------
+[sigma_max_e,~,~,~,~] = CDP_Invariants(s_e,tol_q);
 
-%Calculate Variation of Stress Vector and Hardening Parameter
-%--------------------------------------------------------------
-dd_sk=-J\r; 
-dd_s=dd_sk(1:6);
-dd_k=dd_sk(7:end);
-if i<4000 && not(isempty(find(d_k+dd_k<0, 1))); Yieldfn(d_k+dd_k<0)=[]; continue; end   %Check if there is negative dk, remove the yield function and restart the iteration 
-s=s+dd_s;
-d_k=d_k+dd_k;
-k=k_i+d_k;
+[F_e,~,~,~] = CDP_Yield(s_e,sigma_t,sigma_c,alpha,beta,gamma,tol_q);
 
-for j=1:1:c
-if Yieldfn{j}=='RK'; d_k_RK=d_k(j); k_RK=k(j); end
-if Yieldfn{j}=='DP'; d_k_DP=d_k(j); k_DP=k(j); end
-end
-
-break;
-
-end
-
-if Converged==1; break; end
-
-end
-
-%Calculate Tangential Elastoplastic Stiffness Matrix
-%-----------------------------------------------------
-
-if isempty(Yieldfn)              %There is no active yield function: D_ep=D_e 
-
-D_ep=D_e;
-d=1-exp(-f_t*k_D/g_f);
-s_eff=s;                         %Stress from return mapping algorithm is the effective stress
-s=(1-d)*s_eff;
-D=(1-d)*D_ep;
+if F_e <= tol_F
+    % Elastic effective stress
+    s_eff = s_e;
+    D_ep  = D_e;
+    d     = 1-exp(-f_t*k_D/g_f);
+    s     = (1-d)*s_eff;
+    D     = (1-d)*D_ep;
 
 else
-    
-Hinv=inv(D_e);
-for j=1:1:c
-Hinv=Hinv+d_k(j)*d_d_f_d_d_s{j};    
-end    
-H=inv(Hinv);
-D_ep=H-H*d_f_d_s*inv(h+d_f_d_s'*H*d_f_d_s)*d_f_d_s'*H;
+    % Return mapping: ONE yield surface + ONE plastic multiplier
+    % ---------------------------------------------------------------
+    s = s_e;
+    k = k_i;
 
-%Plastic Strain and its Derivative
-%----------------------------------
-e_p=e-D_e\s;
-d_e_p_d_e=inv(D_e)*(D_e-D_ep);
+    converged = false;
 
-%Principal Plastic Strain
-%------------------------------
-[Tp,Ep] = eig([e_p(1) e_p(4)/2 e_p(6)/2;...
-               e_p(4)/2 e_p(2) e_p(5)/2;...
-               e_p(6)/2 e_p(5)/2 e_p(3)]);
-Ep=diag(Ep);                 
-[Ep,I]=sort(Ep,'descend'); Tp=Tp(:,I);         
+    for it = 1:maxIter
 
-TTp=[Tp(1,1)^2 Tp(2,1)^2 Tp(3,1)^2 Tp(1,1)*Tp(2,1) Tp(2,1)*Tp(3,1) Tp(3,1)*Tp(1,1);...  %Transformation of Plastic Strain Matrix
-     Tp(1,2)^2 Tp(2,2)^2 Tp(3,2)^2 Tp(1,2)*Tp(2,2) Tp(2,2)*Tp(3,2) Tp(3,2)*Tp(1,2);...
-     Tp(1,3)^2 Tp(2,3)^2 Tp(3,3)^2 Tp(1,3)*Tp(2,3) Tp(2,3)*Tp(3,3) Tp(3,3)*Tp(1,3)];
+        [F, dF_ds, d2F_ds2, ~] = CDP_Yield(s,sigma_t,sigma_c,...
+                                             alpha,beta,gamma,tol_q);
 
-%Equivelent Plastic Strain and Its Derivative 
-%---------------------------------------------- 
-Ep_eqv=sqrt(Ep(1)^2+Ep(2)^2+Ep(3)^2);
+        [~, dG_ds, d2G_ds2, ~] = CDP_Flow(s,sigma_t,psi,ecc,tol_q);
 
-d_Ep_eqv_d_Ep=[Ep(1)/(Ep(1)^2 + Ep(2)^2+ Ep(3)^2)^(1/2);...                                           
-               Ep(2)/(Ep(1)^2 + Ep(2)^2+ Ep(3)^2)^(1/2);...
-               Ep(3)/(Ep(1)^2 + Ep(2)^2+ Ep(3)^2)^(1/2)];
+        % Residuals:
+        %   r_sigma = De^{-1}(s-se) + (k-ki)*G_,s = 0
+        %   r_F     = F(s) = 0
+        dk = k-k_i;
 
-d_Ep_eqv_d_ep=TTp'*d_Ep_eqv_d_Ep;
+        r1 = D_e\(s-s_e) + dk*dG_ds;
+        r2 = F;
+        r  = [r1;r2];
 
-d_Ep_eqv_d_e=d_e_p_d_e'*d_Ep_eqv_d_ep;
+        if norm(r1) <= tol_R*max(1,f_t) && ...
+           abs(r2) <= tol_F*max(1,f_t)
+            converged = true;
+            break
+        end
 
-%Loading and Unloading Conditions
-%---------------------------------
-if Ep_eqv>k_D
-k_D=Ep_eqv;    
-d_k_D_d_Ep_eqv=1;
+        % Exact-form Newton Jacobian for the chosen constitutive equations:
+        %
+        % dr_sigma/ds = De^{-1} + dk*d2G/ds2
+        % dr_sigma/dk = dG/ds
+        % dr_F/ds     = dF/ds
+        % dr_F/dk     = 0  (Stage 1: no hardening evolution yet)
+        J11 = inv(D_e) + dk*d2G_ds2;
+        J12 = dG_ds;
+        J21 = dF_ds';
+        J22 = 0;
+        J   = [J11 J12; J21 J22];
+
+        delta = -J\r;
+
+        ds = delta(1:6);
+        dk_new = delta(7);
+
+        % Prevent a Newton step from making the cumulative multiplier
+        % negative. Backtracking is used instead of the old multi-surface
+        % restart logic.
+        if k + dk_new < k_i
+            scale = 1.0;
+            while k + scale*dk_new < k_i
+                scale = 0.5*scale;
+                if scale < 1e-8
+                    break
+                end
+            end
+            ds     = scale*ds;
+            dk_new = scale*dk_new;
+        end
+
+        % Simple residual-based backtracking for robustness.
+        base_norm = norm(r);
+        scale = 1.0;
+        accepted = false;
+
+        while scale >= 1e-6
+            s_try = s + scale*ds;
+            k_try = k + scale*dk_new;
+
+            [F_try,~,~,~] = CDP_Yield(s_try,sigma_t,sigma_c,...
+                                       alpha,beta,gamma,tol_q);
+            dk_try = k_try-k_i;
+            [~,dG_try,~,~] = CDP_Flow(s_try,sigma_t,psi,ecc,tol_q);
+            r1_try = D_e\(s_try-s_e) + dk_try*dG_try;
+            r_try  = [r1_try;F_try];
+
+            if norm(r_try) < base_norm
+                s = s_try;
+                k = k_try;
+                accepted = true;
+                break
+            end
+            scale = 0.5*scale;
+        end
+
+        if ~accepted
+            % Accept the Newton step as a last resort; convergence check
+            % below will catch a failed iteration.
+            s = s + ds;
+            k = max(k_i,k+dk_new);
+        end
+    end
+
+    if ~converged
+        error('Damage_Plasticity_Model:ReturnMapping',...
+              'Unified CDP return mapping did not converge in %d iterations.',maxIter);
+    end
+
+    % Consistent elastoplastic tangent for Stage 1
+    % ------------------------------------------------
+    dk = k-k_i;
+
+    [F,dF_ds,d2F_ds2,~] = CDP_Yield(s,sigma_t,sigma_c,...
+                                     alpha,beta,gamma,tol_q); %#ok<ASGLU>
+    [~,dG_ds,d2G_ds2,~] = CDP_Flow(s,sigma_t,psi,ecc,tol_q);
+
+    % H is the stress-space tangent associated with the current return
+    % mapping equation.
+    Hinv = inv(D_e) + dk*d2G_ds2;
+    H    = inv(Hinv);
+
+    % Yield consistency uses F_,s while plastic flow uses G_,s.
+    denom = dF_ds'*H*dG_ds;
+
+    if abs(denom) < 1e-14
+        error('Damage_Plasticity_Model:SingularTangent',...
+              'The unified CDP consistent tangent denominator is too small.');
+    end
+
+    D_ep = H - H*dG_ds*(1/denom)*dF_ds'*H;
+
+    % Existing plastic-strain and damage part
+    % -----------------------------------------
+    e_p = e-D_e\s;
+    d_e_p_d_e = inv(D_e)*(D_e-D_ep);
+
+    % Principal Plastic Strain
+    [Tp,Ep] = eig([e_p(1) e_p(4)/2 e_p(6)/2;...
+                   e_p(4)/2 e_p(2) e_p(5)/2;...
+                   e_p(6)/2 e_p(5)/2 e_p(3)]);
+    Ep=diag(Ep);
+    [Ep,I]=sort(Ep,'descend');
+    Tp=Tp(:,I);
+
+    TTp=[Tp(1,1)^2 Tp(2,1)^2 Tp(3,1)^2 Tp(1,1)*Tp(2,1) Tp(2,1)*Tp(3,1) Tp(3,1)*Tp(1,1);...
+         Tp(1,2)^2 Tp(2,2)^2 Tp(3,2)^2 Tp(1,2)*Tp(2,2) Tp(2,2)*Tp(3,2) Tp(3,2)*Tp(1,2);...
+         Tp(1,3)^2 Tp(2,3)^2 Tp(3,3)^2 Tp(1,3)*Tp(2,3) Tp(2,3)*Tp(3,3) Tp(3,3)*Tp(1,3)];
+
+    Ep_eqv=sqrt(Ep(1)^2+Ep(2)^2+Ep(3)^2);
+
+    if Ep_eqv > 0
+        d_Ep_eqv_d_Ep=[Ep(1)/(Ep_eqv);...
+                       Ep(2)/(Ep_eqv);...
+                       Ep(3)/(Ep_eqv)];
+    else
+        d_Ep_eqv_d_Ep=zeros(3,1);
+    end
+
+    d_Ep_eqv_d_ep=TTp'*d_Ep_eqv_d_Ep;
+    d_Ep_eqv_d_e=d_e_p_d_e'*d_Ep_eqv_d_ep;
+
+    % Loading and Unloading Conditions
+    if Ep_eqv>k_D
+        k_D=Ep_eqv;
+        d_k_D_d_Ep_eqv=1;
+    else
+        d_k_D_d_Ep_eqv=0;
+    end
+
+    d_k_D_d_e=d_k_D_d_Ep_eqv*d_Ep_eqv_d_e;
+
+    % Existing damage law retained unchanged
+    d=1-exp(-f_t*k_D/g_f);
+    d_d_d_k_D=f_t/g_f*exp(-f_t*k_D/g_f);
+    d_d_d_e=d_d_d_k_D*d_k_D_d_e;
+
+    % Stress and tangent
+    s_eff=s;
+    s=(1-d)*s_eff;
+    D=(1-d)*D_ep-s_eff*d_d_d_e';
+end
+
+% Final material state
+% ---------------------
+Material_State.e     = e;
+Material_State.s     = s;
+Material_State.s_eff = s_eff;
+
+% Keep the old output fields, but synchronize both to the ONE Stage-1 k.
+Material_State.k_RK = k_i;
+Material_State.k_DP = k_i;
+
+if exist('k','var')
+    Material_State.k_RK = k;
+    Material_State.k_DP = k;
+end
+
+Material_State.k_D = k_D;
+Material_State.d   = d;
+
+end
+
+
+% ========================================================================
+function [F,dF_ds,d2F_ds2,aux] = CDP_Yield(s,sigma_t,sigma_c,alpha,beta,gamma,tol_q)
+% Abaqus CDP Lubliner-Lee-Fenves yield surface.
+%
+% F = 1/(1-alpha) * [ q - 3*alpha*p
+%                     + beta*<sigma_max>
+%                     - gamma*<-sigma_max> ] - sigma_c
+%
+% The derivatives are evaluated directly in Cartesian/Voigt stress space.
+% d2F/ds2 is obtained by a symmetric central difference of the analytical
+% first derivative. This retains the correct dependence of the principal
+% stress on the stress tensor and avoids the incomplete T'*H*T operation
+% used in the original routine.
+
+[p,q,sdev,sigma_max,Pmax] = CDP_Invariants(s,tol_q);
+
+pos = max(sigma_max,0);
+neg = max(-sigma_max,0);
+
+F = (q - 3*alpha*p + beta*pos - gamma*neg)/(1-alpha) - sigma_c;
+
+% Derivative of p
+dp = [-1/3;-1/3;-1/3;0;0;0];
+
+% Derivative of q
+if q > tol_q
+    dq = [3/(2*q)*sdev(1);...
+          3/(2*q)*sdev(2);...
+          3/(2*q)*sdev(3);...
+          3/q*sdev(4);...
+          3/q*sdev(5);...
+          3/q*sdev(6)];
 else
-d_k_D_d_Ep_eqv=0;    
+    dq = zeros(6,1);
 end
 
-d_k_D_d_e=d_k_D_d_Ep_eqv*d_Ep_eqv_d_e;
+% d sigma_max / d stress = principal projector of maximum eigenvalue
+dsm = [Pmax(1,1);Pmax(2,2);Pmax(3,3);...
+       2*Pmax(1,2);2*Pmax(2,3);2*Pmax(3,1)];
 
-%Damage and its derivative
-%--------------------------
-d=1-exp(-f_t*k_D/g_f);
-
-d_d_d_k_D=f_t/g_f*exp(-f_t*k_D/g_f);
-
-d_d_d_e=d_d_d_k_D*d_k_D_d_e;
-
-%Stress and its derivative
-%---------------------------
-s_eff=s;         %Stress from return mapping algorithm is the effective stress
-s=(1-d)*s_eff;
-D=(1-d)*D_ep-s_eff*d_d_d_e';
-
+% At sigma_max=0 the Macaulay bracket is nondifferentiable.
+% A centered numerical derivative is preferable to an arbitrary branch.
+if abs(sigma_max) <= 10*tol_q
+    dbr_pos = 0.5*dsm;
+    dbr_neg = -0.5*dsm;
+elseif sigma_max > 0
+    dbr_pos = dsm;
+    dbr_neg = zeros(6,1);
+else
+    dbr_pos = zeros(6,1);
+    dbr_neg = -dsm;
 end
 
-%Final Material State
-%---------------------
-Material_State.e=e;
-Material_State.s=s;
-Material_State.s_eff=s_eff;
-Material_State.k_RK=k_RK;
-Material_State.k_DP=k_DP;
-Material_State.k_D=k_D;
-Material_State.d=d;
+dF_ds = (dq - 3*alpha*dp + beta*dbr_pos - gamma*dbr_neg)/(1-alpha);
 
+% Numerically differentiate the COMPLETE first derivative in Cartesian
+% stress space. This includes the dependence of principal directions.
+h = max(1e-7*max([sigma_t; sigma_c; q; 1]),1e-10);
+d2F_ds2 = zeros(6,6);
+
+for a=1:6
+    ds = zeros(6,1);
+    ds(a)=h;
+    [~,gp,~,~] = CDP_Yield_FirstDerivative(s+ds,sigma_t,sigma_c,...
+                                            alpha,beta,gamma,tol_q);
+    [~,gm,~,~] = CDP_Yield_FirstDerivative(s-ds,sigma_t,sigma_c,...
+                                            alpha,beta,gamma,tol_q);
+    d2F_ds2(:,a)=(gp-gm)/(2*h);
 end
 
+% Enforce the expected symmetry of the Hessian up to numerical error.
+d2F_ds2=0.5*(d2F_ds2+d2F_ds2');
+
+aux.p=p; aux.q=q; aux.sdev=sdev; aux.sigma_max=sigma_max;
+end
+
+
+function [F,dF_ds,d2F_ds2,aux] = CDP_Yield_FirstDerivative(s,sigma_t,sigma_c,alpha,beta,gamma,tol_q)
+[p,q,sdev,sigma_max, Pmax] = CDP_Invariants(s,tol_q);
+
+F=(q-3*alpha*p+beta*max(sigma_max,0)-...
+   gamma*max(-sigma_max,0))/(1-alpha)-sigma_c;
+
+dp=[-1/3;-1/3;-1/3;0;0;0];
+
+if q>tol_q
+    dq=[3/(2*q)*sdev(1);...
+        3/(2*q)*sdev(2);...
+        3/(2*q)*sdev(3);...
+        3/q*sdev(4);...
+        3/q*sdev(5);...
+        3/q*sdev(6)];
+else
+    dq=zeros(6,1);
+end
+
+dsm=[Pmax(1,1);Pmax(2,2);Pmax(3,3);...
+     2*Pmax(1,2);2*Pmax(2,3);2*Pmax(3,1)];
+
+if abs(sigma_max)<=10*tol_q
+    dbr_pos=0.5*dsm;
+    dbr_neg=-0.5*dsm;
+elseif sigma_max>0
+    dbr_pos=dsm; dbr_neg=zeros(6,1);
+else
+    dbr_pos=zeros(6,1); dbr_neg=-dsm;
+end
+
+dF_ds=(dq-3*alpha*dp+beta*dbr_pos-gamma*dbr_neg)/(1-alpha);
+d2F_ds2=zeros(6,6);
+aux=[];
+end
+
+
+function [G,dG_ds,d2G_ds2,aux] = CDP_Flow(s,sigma_t,psi,ecc,tol_q)
+% Abaqus CDP hyperbolic flow potential:
+% G = sqrt((ecc*sigma_t*tan(psi))^2 + q^2) - p*tan(psi)
+
+[p,q,sdev,~,~]=CDP_Invariants(s,tol_q);
+
+A=ecc*sigma_t*tan(psi);
+R=sqrt(A^2+q^2);
+
+G=R-p*tan(psi);
+
+dp=[-1/3;-1/3;-1/3;0;0;0];
+
+if q>tol_q
+    dq=[3/(2*q)*sdev(1);...
+        3/(2*q)*sdev(2);...
+        3/(2*q)*sdev(3);...
+        3/q*sdev(4);...
+        3/q*sdev(5);...
+        3/q*sdev(6)];
+else
+    dq=zeros(6,1);
+end
+
+dG_ds=(q/R)*dq-tan(psi)*dp;
+
+% Exact Hessian of G through the Hessian of q:
+% d2G = (A^2/R^3) dq*dq' + (q/R)*d2q
+%
+% q=sqrt(3/2 s:s), hence in tensor/Voigt representation:
+% d2q is the deviatoric metric term projected consistently into the
+% engineering-shear Voigt representation.
+if q>tol_q
+    % Numerical Hessian of q gives a robust implementation for the
+    % engineering-shear convention used by the original MATLAB code.
+    h=max(1e-7*max([sigma_t;q;1]),1e-10);
+    d2q=zeros(6,6);
+    for a=1:6
+        ds=zeros(6,1); ds(a)=h;
+        [~,gp]=Q_FirstDerivative(s+ds,tol_q);
+        [~,gm]=Q_FirstDerivative(s-ds,tol_q);
+        d2q(:,a)=(gp-gm)/(2*h);
+    end
+    d2q=0.5*(d2q+d2q');
+    d2G_ds2=(A^2/R^3)*(dq*dq')+(q/R)*d2q;
+else
+    d2G_ds2=zeros(6,6);
+end
+
+aux.p=p; aux.q=q; aux.A=A;
+end
+
+
+function [q,dq]=Q_FirstDerivative(s,tol_q)
+[p,q,sdev,~,~]=CDP_Invariants(s,tol_q); %#ok<ASGLU>
+if q>tol_q
+    dq=[3/(2*q)*sdev(1);...
+        3/(2*q)*sdev(2);...
+        3/(2*q)*sdev(3);...
+        3/q*sdev(4);...
+        3/q*sdev(5);...
+        3/q*sdev(6)];
+else
+    dq=zeros(6,1);
+end
+end
+
+
+function [p,q,sdev,sigma_max,Pmax]=CDP_Invariants(s,tol_q)
+% Voigt order: [11 22 33 12 23 31]
+Smat=[s(1) s(4) s(6);...
+      s(4) s(2) s(5);...
+      s(6) s(5) s(3)];
+
+[V,L]=eig(Smat);
+lam=diag(L);
+[lam,idx]=sort(lam,'descend');
+V=V(:,idx);
+
+sigma_max=lam(1);
+Pmax=V(:,1)*V(:,1)';
+
+I1=trace(Smat);
+p=-I1/3;
+
+sdev=Smat+ p*eye(3);
+
+J2tensor=0.5*sum(sum(sdev.*sdev));
+q=sqrt(max(0,3*J2tensor));
+
+if q<tol_q
+    sdev=[sdev(1,1);sdev(2,2);sdev(3,3);...
+          sdev(1,2);sdev(2,3);sdev(3,1)];
+else
+    sdev=[sdev(1,1);sdev(2,2);sdev(3,3);...
+          sdev(1,2);sdev(2,3);sdev(3,1)];
+end
+end
