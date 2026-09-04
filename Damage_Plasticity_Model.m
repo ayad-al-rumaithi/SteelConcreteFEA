@@ -10,9 +10,9 @@ function [Material_State,D]=Damage_Plasticity_Model(Material,Material_State,e)
 %   2) One cumulative plastic multiplier/internal variable k is used.
 %   3) Existing hardening/softening and damage equations are deliberately
 %      NOT replaced yet.
-%   4) Existing function input/output interface is retained.
-%      For backward compatibility, Material_State.k_DP and k_RK are both
-%      kept and synchronized to the single k.
+%   4) Material_State uses ONE internal plastic variable k.
+%      The old k_DP and k_RK variables are removed; no backward compatibility
+%      with the previous multi-surface state variables is retained.
 %   5) Additional CDP parameters are constants below and are NOT added to
 %      the Material input structure.
 %
@@ -42,26 +42,12 @@ g_f = Material.g_f;
 f_c = Material.f_c;
 f_c2= Material.f_c2;
 
-% The original code used these quantities for its DP hardening surface.
-% They are retained because the original material interface is retained.
-beta_old = sqrt(3)*(f_c2-f_c)/(2*f_c2-f_c);
-Hp       = f_c2*f_c/(sqrt(3)*(2*f_c2-f_c)); %#ok<NASGU>
-
 % Previous increment
 % -------------------
 e_i = Material_State.e;
 s_i = Material_State.s_eff;       % effective stress used by return mapping
 k_D = Material_State.k_D;
-
-% Backward-compatible storage:
-% one unified internal variable k is represented by both old fields.
-if isfield(Material_State,'k_DP')
-    k_i = Material_State.k_DP;
-elseif isfield(Material_State,'k_RK')
-    k_i = Material_State.k_RK;
-else
-    k_i = 0;
-end
+k_i = Material_State.k;
 
 % Elastic constitutive matrix
 % ----------------------------
@@ -97,8 +83,6 @@ beta = (sigma_c/sigma_t)*(1-alpha) - (1+alpha);
 
 % Trial yield check
 % ------------------
-[sigma_max_e,~,~,~,~] = CDP_Invariants(s_e,tol_q);
-
 [F_e,~,~,~] = CDP_Yield(s_e,sigma_t,sigma_c,alpha,beta,gamma,tol_q);
 
 if F_e <= tol_F
@@ -289,13 +273,11 @@ Material_State.e     = e;
 Material_State.s     = s;
 Material_State.s_eff = s_eff;
 
-% Keep the old output fields, but synchronize both to the ONE Stage-1 k.
-Material_State.k_RK = k_i;
-Material_State.k_DP = k_i;
-
+% Final Stage-1 internal variables
 if exist('k','var')
-    Material_State.k_RK = k;
-    Material_State.k_DP = k;
+    Material_State.k = k;
+else
+    Material_State.k = k_i;
 end
 
 Material_State.k_D = k_D;

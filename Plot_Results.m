@@ -37,7 +37,7 @@ end
 
 c=c+1;
 Result(c,1)=0;
-e=zeros(6,1); s=zeros(6,1); k=0; k_RK=0; k_DP=0; k_D=0; d=0;   
+e=zeros(6,1); s=zeros(6,1); k=0; k_D=0; d=0;   
 No_Int_Points=Model.Element{i}.No_Int_Points;
 for j=1:1:No_Int_Points
  
@@ -49,8 +49,7 @@ k=k+Model.Element{i}.Integration_Points{j}.k/No_Int_Points;
 end
 
 if strcmp(Model.Material{Model.Element{i}.Material}.Type,'Damage Plasticity Model')    
-k_RK=k_RK+Model.Element{i}.Integration_Points{j}.k_RK/No_Int_Points;   
-k_DP=k_DP+Model.Element{i}.Integration_Points{j}.k_DP/No_Int_Points;   
+k=k+Model.Element{i}.Integration_Points{j}.k/No_Int_Points;   
 k_D=k_D+Model.Element{i}.Integration_Points{j}.k_D/No_Int_Points;   
 d=d+Model.Element{i}.Integration_Points{j}.d/No_Int_Points;   
 end
@@ -103,15 +102,9 @@ if Result_type==13
 Result(c,1)=k;
 end
 if Result_type==14
-Result(c,1)=k_RK;
-end
-if Result_type==15
-Result(c,1)=k_DP;
-end
-if Result_type==16
 Result(c,1)=k_D;
 end
-if Result_type==17
+if Result_type==15
 Result(c,1)=d;
 end
 

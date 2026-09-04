@@ -58,7 +58,7 @@ Max_Step_Divisions=6;                                          %Max Number of st
 
 Show_Deformed=1;                                               %Show deformed shape
 Mag_Factor=20;                                                 %Magnification factor
-Result_type=17;                                                %Result type Null,ez,ey,ez,2exy,2eyz,2ezx,sz,sy,sz,sxy,syz,szx,Inelastic Parameters (0-17)
+Result_type=15;                                                %Result type Null,ez,ey,ez,2exy,2eyz,2ezx,sz,sy,sz,sxy,syz,szx,Inelastic Parameters (0-15)
 
 %Top vertical Constraints
 [DOFx1, DOFy1, DOFz1, Node1]=find_DOF_from_Nodes(Nodes3D,[],[],z(2));
