@@ -26,11 +26,13 @@ function [Material_State,D]=Damage_Plasticity_Model(Material,Material_State,e)
 psi_deg = 35.0;       % Dilation angle, degrees
 ecc      = 0.10;      % Abaqus meridional flow-potential eccentricity
 Kc       = 2.0/3.0;   % Deviatoric-plane parameter, 0.5 < Kc <= 1.0
+rb0_rc0 = 1.16;       % Biaxial/uniaxial compressive strength ratio
 
 % Numerical safeguards
+% ---------------------
 tol_q    = 1.0e-12;
-tol_F   = 1.0e-10;
-tol_R   = 1.0e-10;
+tol_F   = 1.0e-8;
+tol_R   = 1.0e-8;
 maxIter  = 100;
 
 % Material properties
@@ -40,7 +42,6 @@ v   = Material.v;
 f_t = Material.f_t;
 g_f = Material.g_f;
 f_c = Material.f_c;
-f_c2= Material.f_c2;
 
 % Previous increment
 % -------------------
@@ -68,7 +69,6 @@ s_e = s_i + D_e*d_e;
 
 % Abaqus CDP parameters
 % ----------------------
-rb0_rc0  = f_c2/f_c;    % sigma_b0 / sigma_c0
 alpha = (rb0_rc0-1)/(2*rb0_rc0-1);
 gamma = 3*(1-Kc)/(2*Kc-1);
 psi   = psi_deg*pi/180;
@@ -83,7 +83,7 @@ beta = (sigma_c/sigma_t)*(1-alpha) - (1+alpha);
 
 % Trial yield check
 % ------------------
-[F_e,~,~,~] = CDP_Yield(s_e,sigma_t,sigma_c,alpha,beta,gamma,tol_q);
+[F_e,~,~] = CDP_Yield(s_e,sigma_t,sigma_c,alpha,beta,gamma,tol_q);
 
 if F_e <= tol_F
     % Elastic effective stress
@@ -103,7 +103,7 @@ else
 
     for it = 1:maxIter
 
-        [F, dF_ds, d2F_ds2, ~] = CDP_Yield(s,sigma_t,sigma_c,...
+        [F, dF_ds, ~] = CDP_Yield(s,sigma_t,sigma_c,...
                                              alpha,beta,gamma,tol_q);
 
         [~, dG_ds, d2G_ds2, ~] = CDP_Flow(s,sigma_t,psi,ecc,tol_q);
@@ -117,8 +117,13 @@ else
         r2 = F;
         r  = [r1;r2];
 
-        if norm(r1) <= tol_R*max(1,f_t) && ...
-           abs(r2) <= tol_F*max(1,f_t)
+        % Dimensionally consistent convergence scaling:
+        % r1 is strain-like; r2=F is stress-like.
+        strain_scale = max([1.0e-12, norm(d_e), norm(D_e\s_e)]);
+        stress_scale = max([1.0, f_t, f_c, norm(s_e)]);
+
+        if norm(r1) <= tol_R*strain_scale && ...
+           abs(r2) <= tol_F*stress_scale
             converged = true;
             break
         end
@@ -164,7 +169,7 @@ else
             s_try = s + scale*ds;
             k_try = k + scale*dk_new;
 
-            [F_try,~,~,~] = CDP_Yield(s_try,sigma_t,sigma_c,...
+            [F_try,~,~] = CDP_Yield(s_try,sigma_t,sigma_c,...
                                        alpha,beta,gamma,tol_q);
             dk_try = k_try-k_i;
             [~,dG_try,~,~] = CDP_Flow(s_try,sigma_t,psi,ecc,tol_q);
@@ -197,7 +202,7 @@ else
     % ------------------------------------------------
     dk = k-k_i;
 
-    [F,dF_ds,d2F_ds2,~] = CDP_Yield(s,sigma_t,sigma_c,...
+    [~,dF_ds,~] = CDP_Yield(s,sigma_t,sigma_c,...
                                      alpha,beta,gamma,tol_q); %#ok<ASGLU>
     [~,dG_ds,d2G_ds2,~] = CDP_Flow(s,sigma_t,psi,ecc,tol_q);
 
@@ -287,18 +292,15 @@ end
 
 
 % ========================================================================
-function [F,dF_ds,d2F_ds2,aux] = CDP_Yield(s,sigma_t,sigma_c,alpha,beta,gamma,tol_q)
+function [F,dF_ds,aux] = CDP_Yield(s,sigma_t,sigma_c,alpha,beta,gamma,tol_q)
 % Abaqus CDP Lubliner-Lee-Fenves yield surface.
 %
 % F = 1/(1-alpha) * [ q - 3*alpha*p
 %                     + beta*<sigma_max>
 %                     - gamma*<-sigma_max> ] - sigma_c
 %
-% The derivatives are evaluated directly in Cartesian/Voigt stress space.
-% d2F/ds2 is obtained by a symmetric central difference of the analytical
-% first derivative. This retains the correct dependence of the principal
-% stress on the stress tensor and avoids the incomplete T'*H*T operation
-% used in the original routine.
+% Only the yield gradient is required by the Stage-1 return mapping and
+% consistent tangent. The unused numerical Hessian of F has been removed.
 
 [p,q,sdev,sigma_max,Pmax] = CDP_Invariants(s,tol_q);
 
@@ -307,10 +309,8 @@ neg = max(-sigma_max,0);
 
 F = (q - 3*alpha*p + beta*pos - gamma*neg)/(1-alpha) - sigma_c;
 
-% Derivative of p
 dp = [-1/3;-1/3;-1/3;0;0;0];
 
-% Derivative of q
 if q > tol_q
     dq = [3/(2*q)*sdev(1);...
           3/(2*q)*sdev(2);...
@@ -322,12 +322,10 @@ else
     dq = zeros(6,1);
 end
 
-% d sigma_max / d stress = principal projector of maximum eigenvalue
 dsm = [Pmax(1,1);Pmax(2,2);Pmax(3,3);...
        2*Pmax(1,2);2*Pmax(2,3);2*Pmax(3,1)];
 
-% At sigma_max=0 the Macaulay bracket is nondifferentiable.
-% A centered numerical derivative is preferable to an arbitrary branch.
+% Centered subgradient at the Macaulay-bracket corner.
 if abs(sigma_max) <= 10*tol_q
     dbr_pos = 0.5*dsm;
     dbr_neg = -0.5*dsm;
@@ -341,68 +339,16 @@ end
 
 dF_ds = (dq - 3*alpha*dp + beta*dbr_pos - gamma*dbr_neg)/(1-alpha);
 
-% Numerically differentiate the COMPLETE first derivative in Cartesian
-% stress space. This includes the dependence of principal directions.
-h = max(1e-7*max([sigma_t; sigma_c; q; 1]),1e-10);
-d2F_ds2 = zeros(6,6);
-
-for a=1:6
-    ds = zeros(6,1);
-    ds(a)=h;
-    [~,gp,~,~] = CDP_Yield_FirstDerivative(s+ds,sigma_t,sigma_c,...
-                                            alpha,beta,gamma,tol_q);
-    [~,gm,~,~] = CDP_Yield_FirstDerivative(s-ds,sigma_t,sigma_c,...
-                                            alpha,beta,gamma,tol_q);
-    d2F_ds2(:,a)=(gp-gm)/(2*h);
-end
-
-% Enforce the expected symmetry of the Hessian up to numerical error.
-d2F_ds2=0.5*(d2F_ds2+d2F_ds2');
-
 aux.p=p; aux.q=q; aux.sdev=sdev; aux.sigma_max=sigma_max;
-end
-
-
-function [F,dF_ds,d2F_ds2,aux] = CDP_Yield_FirstDerivative(s,sigma_t,sigma_c,alpha,beta,gamma,tol_q)
-[p,q,sdev,sigma_max, Pmax] = CDP_Invariants(s,tol_q);
-
-F=(q-3*alpha*p+beta*max(sigma_max,0)-...
-   gamma*max(-sigma_max,0))/(1-alpha)-sigma_c;
-
-dp=[-1/3;-1/3;-1/3;0;0;0];
-
-if q>tol_q
-    dq=[3/(2*q)*sdev(1);...
-        3/(2*q)*sdev(2);...
-        3/(2*q)*sdev(3);...
-        3/q*sdev(4);...
-        3/q*sdev(5);...
-        3/q*sdev(6)];
-else
-    dq=zeros(6,1);
-end
-
-dsm=[Pmax(1,1);Pmax(2,2);Pmax(3,3);...
-     2*Pmax(1,2);2*Pmax(2,3);2*Pmax(3,1)];
-
-if abs(sigma_max)<=10*tol_q
-    dbr_pos=0.5*dsm;
-    dbr_neg=-0.5*dsm;
-elseif sigma_max>0
-    dbr_pos=dsm; dbr_neg=zeros(6,1);
-else
-    dbr_pos=zeros(6,1); dbr_neg=-dsm;
-end
-
-dF_ds=(dq-3*alpha*dp+beta*dbr_pos-gamma*dbr_neg)/(1-alpha);
-d2F_ds2=zeros(6,6);
-aux=[];
 end
 
 
 function [G,dG_ds,d2G_ds2,aux] = CDP_Flow(s,sigma_t,psi,ecc,tol_q)
 % Abaqus CDP hyperbolic flow potential:
 % G = sqrt((ecc*sigma_t*tan(psi))^2 + q^2) - p*tan(psi)
+%
+% The gradient and Hessian used by Newton and the consistent tangent are
+% analytical. No finite-difference derivatives are used here.
 
 [p,q,sdev,~,~]=CDP_Invariants(s,tol_q);
 
@@ -413,58 +359,40 @@ G=R-p*tan(psi);
 
 dp=[-1/3;-1/3;-1/3;0;0;0];
 
+% q^2 = s' * Mq * s for stress Voigt order [11 22 33 12 23 31].
+% The shear stresses are tensor shear components (not engineering strains).
+Mq = [ 1.0 -0.5 -0.5  0 0 0;...
+      -0.5  1.0 -0.5  0 0 0;...
+      -0.5 -0.5  1.0  0 0 0;...
+       0    0    0     3 0 0;...
+       0    0    0     0 3 0;...
+       0    0    0     0 0 3];
+
 if q>tol_q
-    dq=[3/(2*q)*sdev(1);...
-        3/(2*q)*sdev(2);...
-        3/(2*q)*sdev(3);...
-        3/q*sdev(4);...
-        3/q*sdev(5);...
-        3/q*sdev(6)];
+    dq=(Mq*s)/q;
+    d2q=Mq/q-(dq*dq')/q;
 else
+    % At q=0, q itself is nondifferentiable. The hyperbolic potential G,
+    % however, is smooth because A>0 for the present CDP parameters.
     dq=zeros(6,1);
+    d2q=zeros(6,6);
 end
 
 dG_ds=(q/R)*dq-tan(psi)*dp;
 
-% Exact Hessian of G through the Hessian of q:
-% d2G = (A^2/R^3) dq*dq' + (q/R)*d2q
-%
-% q=sqrt(3/2 s:s), hence in tensor/Voigt representation:
-% d2q is the deviatoric metric term projected consistently into the
-% engineering-shear Voigt representation.
+% Exact Hessian away from q=0:
+% d2G = (A^2/R^3) dq*dq' + (q/R) d2q.
+% At q=0, use the finite analytical limit d2G = Mq/A.
 if q>tol_q
-    % Numerical Hessian of q gives a robust implementation for the
-    % engineering-shear convention used by the original MATLAB code.
-    h=max(1e-7*max([sigma_t;q;1]),1e-10);
-    d2q=zeros(6,6);
-    for a=1:6
-        ds=zeros(6,1); ds(a)=h;
-        [~,gp]=Q_FirstDerivative(s+ds,tol_q);
-        [~,gm]=Q_FirstDerivative(s-ds,tol_q);
-        d2q(:,a)=(gp-gm)/(2*h);
-    end
-    d2q=0.5*(d2q+d2q');
     d2G_ds2=(A^2/R^3)*(dq*dq')+(q/R)*d2q;
 else
-    d2G_ds2=zeros(6,6);
+    d2G_ds2=Mq/A;
 end
+
+% Remove roundoff-level asymmetry.
+d2G_ds2=0.5*(d2G_ds2+d2G_ds2');
 
 aux.p=p; aux.q=q; aux.A=A;
-end
-
-
-function [q,dq]=Q_FirstDerivative(s,tol_q)
-[p,q,sdev,~,~]=CDP_Invariants(s,tol_q); %#ok<ASGLU>
-if q>tol_q
-    dq=[3/(2*q)*sdev(1);...
-        3/(2*q)*sdev(2);...
-        3/(2*q)*sdev(3);...
-        3/q*sdev(4);...
-        3/q*sdev(5);...
-        3/q*sdev(6)];
-else
-    dq=zeros(6,1);
-end
 end
 
 

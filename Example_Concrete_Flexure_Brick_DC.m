@@ -42,7 +42,6 @@ Material{1,1}.v=0.2;                                           %Poisson ratio of
 Material{1,1}.f_t=3.33;
 Material{1,1}.G_f=0.124;
 Material{1,1}.f_c=29; 
-Material{1,1}.f_c2=34;
 Material{1,1}.Type='Damage Plasticity Model';
 
 Analysis_Options.Iteration_Method='Newton-Raphson';            %Iteration Method
