@@ -41,7 +41,7 @@ Material{1,1}.Type='Damage Plasticity Model';
 
 Analysis_Options.Iteration_Method='Newton-Raphson';            %Iteration Method
 Analysis_Options.Max_Iterations=10;                            %Solver max number of iterations
-Analysis_Options.Force_Tolerance=100;                          %Force Tolerance 
+Analysis_Options.Force_Tolerance=1;                            %Force Tolerance 
 Analysis_Options.Disp_Tolerance=0;                             %Displacement Tolerance
 Analysis_Options.Diverge_Tolerance=20;                         %Divergence Tolerance
 Analysis_Options.Line_Search_Used=1;                           %Is Line Search Used
