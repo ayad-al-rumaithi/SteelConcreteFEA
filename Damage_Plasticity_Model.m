@@ -408,7 +408,29 @@ lam=diag(L);
 V=V(:,idx);
 
 sigma_max=lam(1);
-Pmax=V(:,1)*V(:,1)';
+
+% Derivative/subgradient of the maximum principal stress.
+%
+% For a unique maximum principal stress:
+%     d(sigma_max)/dS = n_max*n_max'
+%
+% At a repeated maximum eigenvalue the maximum-principal direction is not
+% unique. Selecting only one eigenvector makes the tangent depend on the
+% arbitrary eigenvector returned by eig().  Use the centered projector over
+% the complete repeated maximum eigenspace instead.  This preserves the
+% symmetry of axisymmetric/repeated-principal-stress states and corresponds
+% to the centered derivative used by the independent tangent check.
+eig_scale = max([1;abs(lam)]);
+eig_tol   = 1.0e-10*eig_scale;
+
+is_max = abs(lam-sigma_max) <= eig_tol;
+m_max  = sum(is_max);
+
+Vmax = V(:,is_max);
+Pmax = (Vmax*Vmax')/m_max;
+
+% Remove roundoff-level asymmetry.
+Pmax = 0.5*(Pmax+Pmax');
 
 I1=trace(Smat);
 p=-I1/3;
