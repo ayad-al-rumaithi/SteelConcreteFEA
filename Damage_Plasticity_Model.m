@@ -160,8 +160,11 @@ else
             dk_new = scale*dk_new;
         end
 
-        % Simple residual-based backtracking for robustness.
-        base_norm = norm(r);
+        % Dimensionless residual-based backtracking for robustness.
+        % Use the same strain/stress scaling as the convergence check so
+        % strain-like r1 and stress-like r2=F are not mixed directly.
+        base_norm = sqrt((norm(r1)/strain_scale)^2 + ...
+                         (r2/stress_scale)^2);
         scale = 1.0;
         accepted = false;
 
@@ -174,9 +177,11 @@ else
             dk_try = k_try-k_i;
             [~,dG_try,~,~] = CDP_Flow(s_try,sigma_t,psi,ecc,tol_q);
             r1_try = D_e\(s_try-s_e) + dk_try*dG_try;
-            r_try  = [r1_try;F_try];
 
-            if norm(r_try) < base_norm
+            try_norm = sqrt((norm(r1_try)/strain_scale)^2 + ...
+                            (F_try/stress_scale)^2);
+
+            if try_norm < base_norm
                 s = s_try;
                 k = k_try;
                 accepted = true;
