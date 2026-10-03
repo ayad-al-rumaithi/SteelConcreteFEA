@@ -31,8 +31,8 @@ rb0_rc0 = 1.16;       % Biaxial/uniaxial compressive strength ratio
 % Numerical safeguards
 % ---------------------
 tol_q    = 1.0e-12;
-tol_F   = 1.0e-8;
-tol_R   = 1.0e-8;
+tol_F   = 1.0e-12;
+tol_R   = 1.0e-12;
 maxIter  = 100;
 
 % Material properties
