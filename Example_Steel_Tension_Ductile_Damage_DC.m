@@ -41,7 +41,6 @@ Max_Step_Divisions=3;                                          %Max Number of st
 
 Show_Deformed=1;                                               %Show deformed shape
 Mag_Factor=1;                                                  %Magnification factor
-Result_type=13;                                                %Result type Null,ez,ey,ez,2exy,2eyz,2ezx,sz,sy,sz,sxy,syz,szx,Inelastic Parameters (0-15)
 
 %Top vertical Constraints
 for i=1:1:Nt
@@ -134,7 +133,7 @@ Plot_Results(Job{end}.Model,Show_Deformed,Mag_Factor,9);
 title('Stress in z-direction');
 
 Plot_Results(Job{end}.Model,Show_Deformed,Mag_Factor,13);
-title('Hardening Parameter');
+title('Plastic Internal Variable');
 
 Plot_Results(Job{end}.Model,Show_Deformed,Mag_Factor,15);
 title('Damage');

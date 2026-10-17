@@ -1,26 +1,19 @@
 function [Material_State,D]=Damage_Plasticity_Model(Material,Material_State,e)
 
-% STAGE 1:
-% Unified Abaqus Concrete Damaged Plasticity (Lubliner-Lee-Fenves)
-% yield surface with Abaqus-type hyperbolic non-associated flow potential.
+% STAGE II-A: separate tension/compression damage (intermediate model).
+% Based on verified Stage I. Effective-stress CDP return mapping is unchanged.
+% Histories use stress-weighted principal PLASTIC INCREMENTS. d_t is the retained
+% provisional exponential tensile law, while d_c = 0 until Stage II-C.
+% Nominal stress uses spectral tension/compression split of effective stress.
+% This produces unilateral compressive stiffness recovery after tensile damage.
+% The stress-split law is nonsmooth at zero principal stress; tangent there
+% is a centered generalized derivative. No MC2010 laws are implemented yet.
 %
-% Stage-1 scope:
-%   1) Rankine + Drucker-Prager multi-surface formulation is replaced by
-%      ONE yield surface.
-%   2) One cumulative plastic multiplier/internal variable k is used.
-%   3) Existing hardening/softening and damage equations are deliberately
-%      NOT replaced yet.
-%   4) Material_State uses ONE internal plastic variable k.
-%      The old k_DP and k_RK variables are removed; no backward compatibility
-%      with the previous multi-surface state variables is retained.
-%   5) Additional CDP parameters are constants below and are NOT added to
-%      the Material input structure.
+% Required initial state fields: e,s,s_eff,k,k_Dt,k_Dc,d_t,d_c.
+% Initial values: zeros(6,1) for e,s,s_eff; zero for other fields.
+% No backward compatibility with Stage-I k_D/d is provided.
+% Inputs/outputs and material fields remain unchanged.
 %
-% Important:
-%   The present stage keeps the original scalar damage variable d and its
-%   evolution exactly in the final part of the original routine. The
-%   MC2010 compression/tension laws and two damage variables are Stage 2+.
-
 % Additional unified-CDP parameters (assumed constants for Stage 1)
 % -------------------------------------------------------------------------
 psi_deg = 35.0;       % Dilation angle, degrees
@@ -47,7 +40,8 @@ f_c = Material.f_c;
 % -------------------
 e_i = Material_State.e;
 s_i = Material_State.s_eff;       % effective stress used by return mapping
-k_D = Material_State.k_D;
+k_Dt = Material_State.k_Dt;
+k_Dc = Material_State.k_Dc;
 k_i = Material_State.k;
 
 % Elastic constitutive matrix
@@ -89,9 +83,7 @@ if F_e <= tol_F
     % Elastic effective stress
     s_eff = s_e;
     D_ep  = D_e;
-    d     = 1-exp(-f_t*k_D/g_f);
-    s     = (1-d)*s_eff;
-    D     = (1-d)*D_ep;
+    k = k_i;
 
 else
     % Return mapping: ONE yield surface + ONE plastic multiplier
@@ -226,56 +218,65 @@ else
 
     D_ep = H - H*dG_ds*(1/denom)*dF_ds'*H;
 
-    % Existing plastic-strain and damage part
-    % -----------------------------------------
-    e_p = e-D_e\s;
-    d_e_p_d_e = inv(D_e)*(D_e-D_ep);
-
-    % Principal Plastic Strain
-    [Tp,Ep] = eig([e_p(1) e_p(4)/2 e_p(6)/2;...
-                   e_p(4)/2 e_p(2) e_p(5)/2;...
-                   e_p(6)/2 e_p(5)/2 e_p(3)]);
-    Ep=diag(Ep);
-    [Ep,I]=sort(Ep,'descend');
-    Tp=Tp(:,I);
-
-    TTp=[Tp(1,1)^2 Tp(2,1)^2 Tp(3,1)^2 Tp(1,1)*Tp(2,1) Tp(2,1)*Tp(3,1) Tp(3,1)*Tp(1,1);...
-         Tp(1,2)^2 Tp(2,2)^2 Tp(3,2)^2 Tp(1,2)*Tp(2,2) Tp(2,2)*Tp(3,2) Tp(3,2)*Tp(1,2);...
-         Tp(1,3)^2 Tp(2,3)^2 Tp(3,3)^2 Tp(1,3)*Tp(2,3) Tp(2,3)*Tp(3,3) Tp(3,3)*Tp(1,3)];
-
-    Ep_eqv=sqrt(Ep(1)^2+Ep(2)^2+Ep(3)^2);
-
-    if Ep_eqv > 0
-        d_Ep_eqv_d_Ep=[Ep(1)/(Ep_eqv);...
-                       Ep(2)/(Ep_eqv);...
-                       Ep(3)/(Ep_eqv)];
-    else
-        d_Ep_eqv_d_Ep=zeros(3,1);
-    end
-
-    d_Ep_eqv_d_ep=TTp'*d_Ep_eqv_d_Ep;
-    d_Ep_eqv_d_e=d_e_p_d_e'*d_Ep_eqv_d_ep;
-
-    % Loading and Unloading Conditions
-    if Ep_eqv>k_D
-        k_D=Ep_eqv;
-        d_k_D_d_Ep_eqv=1;
-    else
-        d_k_D_d_Ep_eqv=0;
-    end
-
-    d_k_D_d_e=d_k_D_d_Ep_eqv*d_Ep_eqv_d_e;
-
-    % Existing damage law retained unchanged
-    d=1-exp(-f_t*k_D/g_f);
-    d_d_d_k_D=f_t/g_f*exp(-f_t*k_D/g_f);
-    d_d_d_e=d_d_d_k_D*d_k_D_d_e;
-
-    % Stress and tangent
-    s_eff=s;
-    s=(1-d)*s_eff;
-    D=(1-d)*D_ep-s_eff*d_d_d_e';
 end
+
+% STAGE II-A damage update and exact branchwise nominal tangent.
+% This occurs after both elastic and plastic effective-stress updates.
+% For elastic steps D_ep = D_e; plastic steps use Stage-I D_ep.
+% In the plastic branch s is still the effective stress at this point.
+if F_e > tol_F
+    s_eff = s;
+end
+
+% Abaqus-inspired stress-weighted INCREMENTAL plastic-strain histories.
+% Plastic increment from the effective-stress return mapping:
+%   Delta_ep = Delta_e - De^{-1} Delta_s_eff.
+% Unlike Stage II-A's previous max-norm of total plastic strain, these
+% histories accumulate positive increments and distinguish stress states.
+% r = sum(<sigma_i_eff>_+) / sum(abs(sigma_i_eff)).
+% Delta_kDt = r * <largest principal Delta_ep>_+;
+% Delta_kDc = (1-r) * <-smallest principal Delta_ep>_+.
+% This is an Abaqus-inspired discretization, not a claim of bitwise
+% equivalence to Abaqus internal time integration.
+S_e = inv(D_e);
+delta_ep = d_e - S_e*(s_eff-s_i);
+d_delta_ep_d_e = eye(6) - S_e*D_ep;
+[dk_t,dk_c] = ...
+    CDP_WeightedPlasticIncrements(delta_ep,s_eff);
+
+% The weight r also changes with effective stress. Its derivative is
+% included in the nominal tangent on smooth branches.
+[r,grad_r_s] = CDP_TensionStressWeight(s_eff);
+[ep_max,grad_ep_max,ep_min,grad_ep_min] = ...
+    CDP_ExtremePlasticStrains(delta_ep);
+pt = max(ep_max,0);
+pc = max(-ep_min,0);
+grad_pt = zeros(6,1);
+grad_pc = zeros(6,1);
+if ep_max > 0
+    grad_pt = grad_ep_max;
+end
+if ep_min < 0
+    grad_pc = -grad_ep_min;
+end
+grad_kDt_e = r*(d_delta_ep_d_e'*grad_pt) ...
+              + pt*(D_ep'*grad_r_s);
+grad_kDc_e = (1-r)*(d_delta_ep_d_e'*grad_pc) ...
+              - pc*(D_ep'*grad_r_s);
+
+% Accumulated histories: irreversibility by nonnegative increments.
+k_Dt = k_Dt + dk_t;
+k_Dc = k_Dc + dk_c;
+% Provisional tensile law retained from Stage I; compression law deferred.
+d_t = 1-exp(-f_t*k_Dt/g_f);
+d_c = 0;
+grad_dt_e = (f_t/g_f)*(1-d_t)*grad_kDt_e;
+grad_dc_e = zeros(6,1);
+
+% Spectral stress split: sigma = (1-d_t)<s_eff>_+ - (1-d_c)<-s_eff>_+.
+% d/d(e) includes the spectral projectors and the damage history derivative.
+[s,D] = CDP_SplitDamageStressTangent(s_eff,D_ep,d_t,d_c,...
+                                      grad_dt_e,grad_dc_e);
 
 % Final material state
 % ---------------------
@@ -283,15 +284,13 @@ Material_State.e     = e;
 Material_State.s     = s;
 Material_State.s_eff = s_eff;
 
-% Final Stage-1 internal variables
-if exist('k','var')
-    Material_State.k = k;
-else
-    Material_State.k = k_i;
-end
+% Final Stage-II-A internal variables
+Material_State.k = k;
 
-Material_State.k_D = k_D;
-Material_State.d   = d;
+Material_State.k_Dt = k_Dt;
+Material_State.k_Dc = k_Dc;
+Material_State.d_t  = d_t;
+Material_State.d_c  = d_c;
 
 end
 
@@ -452,4 +451,131 @@ else
     sdev=[sdev(1,1);sdev(2,2);sdev(3,3);...
           sdev(1,2);sdev(2,3);sdev(3,1)];
 end
+end
+
+
+% ========================================================================
+function T = CDP_VoigtStressTensor(v)
+T = [v(1),v(4),v(6);v(4),v(2),v(5);v(6),v(5),v(3)];
+end
+
+function v = CDP_TensorStressVoigt(T)
+v = [T(1,1);T(2,2);T(3,3);T(1,2);T(2,3);T(3,1)];
+end
+
+function [dt,dc,gdt,gdc] = CDP_WeightedPlasticIncrements(dep,s_eff)
+% Incremental history measures, nonnegative by construction.
+[r,~] = CDP_TensionStressWeight(s_eff);
+[emax,gmax,emin,gmin] = CDP_ExtremePlasticStrains(dep);
+dt = r*max(emax,0);
+dc = (1-r)*max(-emin,0);
+gdt = zeros(6,1); gdc = zeros(6,1);
+if emax>0, gdt=r*gmax; end
+if emin<0, gdc=-(1-r)*gmin; end
+end
+
+function [r,grad] = CDP_TensionStressWeight(s)
+% r = sum positive effective principal stresses / sum absolute stresses.
+% Exact derivative on smooth stress branches, centered derivative at zero.
+T=CDP_VoigtStressTensor(s);
+[V,L]=eig(T);
+lam=diag(L);
+tol=1e-12*max(1,max(abs(lam)));
+p=max(lam,0);
+a=sum(p); b=sum(abs(lam));
+grad=zeros(6,1);
+if b<=tol
+    r=0; % zero stress: no plastic loading expected
+    return
+end
+r=a/b;
+ga=zeros(3,3); gb=zeros(3,3);
+for i=1:3
+    if lam(i)>tol
+        da=1; db=1;
+    elseif lam(i)<-tol
+        da=0; db=-1;
+    else
+        da=0.5; db=0;
+    end
+    ga=ga+da*(V(:,i)*V(:,i)');
+    gb=gb+db*(V(:,i)*V(:,i)');
+end
+gr=(b*ga-a*gb)/(b*b);
+grad=[gr(1,1);gr(2,2);gr(3,3);...
+      2*gr(1,2);2*gr(2,3);2*gr(3,1)];
+end
+
+function [emax,gmax,emin,gmin] = CDP_ExtremePlasticStrains(dep)
+% Engineering shear in strain Voigt: tensor off-diagonals are dep(4:6)/2.
+T=[dep(1) dep(4)/2 dep(6)/2;...
+   dep(4)/2 dep(2) dep(5)/2;...
+   dep(6)/2 dep(5)/2 dep(3)];
+[V,L]=eig(T);
+lam=diag(L);
+emax=max(lam); emin=min(lam);
+tol=1e-10*max(1,max(abs(lam)));
+imax=abs(lam-emax)<=tol;
+imin=abs(lam-emin)<=tol;
+Pmax=(V(:,imax)*V(:,imax)')/sum(imax);
+Pmin=(V(:,imin)*V(:,imin)')/sum(imin);
+gmax=[Pmax(1,1);Pmax(2,2);Pmax(3,3);...
+      Pmax(1,2);Pmax(2,3);Pmax(3,1)];
+gmin=[Pmin(1,1);Pmin(2,2);Pmin(3,3);...
+      Pmin(1,2);Pmin(2,3);Pmin(3,1)];
+end
+
+function [s_nom,D_nom] = CDP_SplitDamageStressTangent(s_eff,D_ep,dt,dc,gdt,gdc)
+% Exact Frechet derivative on smooth spectral branches.
+% At a zero principal stress, the centered generalized derivative is used.
+% Stress Voigt uses tensor shear, strain Voigt uses engineering shear.
+S = CDP_VoigtStressTensor(s_eff);
+[V,L] = eig(S);
+lam = diag(L);
+pos = max(lam,0);
+neg = min(lam,0);
+Sp = V*diag(pos)*V';
+Sn = V*diag(neg)*V';
+s_nom = CDP_TensorStressVoigt((1-dt)*Sp+(1-dc)*Sn);
+
+% Loewner matrix for positive-part spectral function.
+scale = max(1,max(abs(lam)));
+Lpos = zeros(3,3);
+for i=1:3
+    for j=1:3
+        if i==j
+            if lam(i)>1e-12*scale
+                Lpos(i,j)=1;
+            elseif lam(i)<-1e-12*scale
+                Lpos(i,j)=0;
+            else
+                Lpos(i,j)=0.5;
+            end
+        elseif abs(lam(i)-lam(j))>1e-12*scale
+            Lpos(i,j)=(pos(i)-pos(j))/(lam(i)-lam(j));
+        else
+            if lam(i)>1e-12*scale && lam(j)>1e-12*scale
+                Lpos(i,j)=1;
+            elseif lam(i)<-1e-12*scale && lam(j)<-1e-12*scale
+                Lpos(i,j)=0;
+            else
+                Lpos(i,j)=0.5;
+            end
+        end
+    end
+end
+
+% Derivative of sigma_nom w.r.t effective stress, then chain through D_ep.
+A=zeros(6,6);
+for j=1:6
+    basis=zeros(6,1);
+    basis(j)=1;
+    dS=CDP_VoigtStressTensor(basis);
+    B=V'*dS*V;
+    dSp=V*(Lpos.*B)*V';
+    dSn=dS-dSp;
+    A(:,j)=CDP_TensorStressVoigt((1-dt)*dSp+(1-dc)*dSn);
+end
+D_nom=A*D_ep-CDP_TensorStressVoigt(Sp)*gdt' ...
+              -CDP_TensorStressVoigt(Sn)*gdc';
 end

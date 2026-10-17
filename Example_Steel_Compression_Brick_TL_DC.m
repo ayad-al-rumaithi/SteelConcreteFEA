@@ -47,7 +47,6 @@ Max_Step_Divisions=3;                                          %Max Number of st
 
 Show_Deformed=1;                                               %Show deformed shape
 Mag_Factor=1;                                                  %Magnification factor
-Result_type=13;                                                %Result type Null,ez,ey,ez,2exy,2eyz,2ezx,sz,sy,sz,sxy,syz,szx,Inelastic Parameters (0-15)
 
 %Top hinge Constraints
 [DOFx1, DOFy1, DOFz1, Node1]=find_DOF_from_Nodes(Nodes3D,[],[],L);
@@ -127,7 +126,7 @@ Plot_Results(Job{end}.Model,Show_Deformed,Mag_Factor,9);
 title('Stress in z-direction');
 
 Plot_Results(Job{end}.Model,Show_Deformed,Mag_Factor,13);
-title('Hardening Parameter');
+title('Plastic Internal Variable');
 
 %Deflection Nodes
 [DOFxg1, DOFyg1, DOFzg1, Nodeg1]=find_DOF_from_Nodes(Nodes3D,0,0,0);

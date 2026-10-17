@@ -13,8 +13,10 @@ Initial_Damage_Plasticity_Model_State.e=[0; 0; 0; 0; 0; 0];
 Initial_Damage_Plasticity_Model_State.s=[0; 0; 0; 0; 0; 0];
 Initial_Damage_Plasticity_Model_State.s_eff=[0; 0; 0; 0; 0; 0];
 Initial_Damage_Plasticity_Model_State.k=0;
-Initial_Damage_Plasticity_Model_State.k_D=0;
-Initial_Damage_Plasticity_Model_State.d=0;
+Initial_Damage_Plasticity_Model_State.k_Dt=0;
+Initial_Damage_Plasticity_Model_State.k_Dc=0;
+Initial_Damage_Plasticity_Model_State.d_t=0;
+Initial_Damage_Plasticity_Model_State.d_c=0;
 
 Initial_Elastic_Plastic_Ductile_Damage_Model.e=[0; 0; 0; 0; 0; 0];
 Initial_Elastic_Plastic_Ductile_Damage_Model.s=[0; 0; 0; 0; 0; 0];

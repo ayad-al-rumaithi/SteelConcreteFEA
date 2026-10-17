@@ -57,7 +57,6 @@ Max_Step_Divisions=3;                                          %Max Number of st
 
 Show_Deformed=1;                                               %Show deformed shape
 Mag_Factor=100;                                                %Magnification factor
-Result_type=13;                                                %Result type Null,ez,ey,ez,2exy,2eyz,2ezx,sz,sy,sz,sxy,syz,szx,Inelastic Parameters (0-15)
 
 %Top vertical Constraints
 [DOFx1, DOFy1, DOFz1, Node1]=find_DOF_from_Nodes(Nodes3D,[],[],z(2));
@@ -139,6 +138,12 @@ Job=Run_Job(Model,Loading_Steps,Analysis_Options,Max_Step_Divisions);
 
 Plot_Results(Job{end}.Model,Show_Deformed,Mag_Factor,9);
 title('Stress in z-direction');
+
+Plot_Results(Job{end}.Model,Show_Deformed,Mag_Factor,18);
+title('Tensile Damage');
+
+Plot_Results(Job{end}.Model,Show_Deformed,Mag_Factor,19);
+title('Compressive Damage');
 
 for i=1:1:length(Job)
      

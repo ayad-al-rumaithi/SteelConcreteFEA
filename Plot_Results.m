@@ -1,5 +1,34 @@
 function Plot_Results(Model,Show_Deformed,Mag_Factor,Result_type,Materials)
 
+% Result_type:
+%   0  - Geometry only
+%   1  - Strain component e(1)
+%   2  - Strain component e(2)
+%   3  - Strain component e(3)
+%   4  - Strain component e(4)
+%   5  - Strain component e(5)
+%   6  - Strain component e(6)
+%   7  - Stress component s(1)
+%   8  - Stress component s(2)
+%   9  - Stress component s(3)
+%  10  - Stress component s(4)
+%  11  - Stress component s(5)
+%  12  - Stress component s(6)
+%  13  - Plastic internal variable k
+%  14  - Ductile damage history k_D
+%  15  - Ductile damage variable d
+%  16  - Concrete tensile damage history k_Dt
+%  17  - Concrete compressive damage history k_Dc
+%  18  - Concrete tensile damage variable d_t
+%  19  - Concrete compressive damage variable d_c
+%
+% Optional Materials argument: vector of material indices to display.
+% Omit Materials or pass [] to display all materials.
+
+if nargin<5
+    Materials=[];
+end
+
 NNode=length(Model.Node);
 
 for i=1:1:NNode
@@ -31,13 +60,14 @@ j_Lines=0;
 
 for i=1:1:NElement
     
-if nargin==5
-if isempty(find(Materials==Model.Element{i}.Material, 1)); continue; end    
+if ~isempty(Materials) && ~ismember(Model.Element{i}.Material,Materials)
+    continue;
 end
 
 c=c+1;
 Result(c,1)=0;
-e=zeros(6,1); s=zeros(6,1); k=0; k_D=0; d=0;   
+e=zeros(6,1); s=zeros(6,1); k=0; k_D=0; d=0; k_Dt=0; k_Dc=0; d_t=0; d_c=0;
+
 No_Int_Points=Model.Element{i}.No_Int_Points;
 for j=1:1:No_Int_Points
  
@@ -48,10 +78,12 @@ if strcmp(Model.Material{Model.Element{i}.Material}.Type,'Elastic Plastic Model'
 k=k+Model.Element{i}.Integration_Points{j}.k/No_Int_Points;                
 end
 
-if strcmp(Model.Material{Model.Element{i}.Material}.Type,'Damage Plasticity Model')    
-k=k+Model.Element{i}.Integration_Points{j}.k/No_Int_Points;   
-k_D=k_D+Model.Element{i}.Integration_Points{j}.k_D/No_Int_Points;   
-d=d+Model.Element{i}.Integration_Points{j}.d/No_Int_Points;   
+if strcmp(Model.Material{Model.Element{i}.Material}.Type,'Damage Plasticity Model')
+k=k+Model.Element{i}.Integration_Points{j}.k/No_Int_Points;
+k_Dt=k_Dt+Model.Element{i}.Integration_Points{j}.k_Dt/No_Int_Points;
+k_Dc=k_Dc+Model.Element{i}.Integration_Points{j}.k_Dc/No_Int_Points;
+d_t=d_t+Model.Element{i}.Integration_Points{j}.d_t/No_Int_Points;
+d_c=d_c+Model.Element{i}.Integration_Points{j}.d_c/No_Int_Points;
 end
 
 if strcmp(Model.Material{Model.Element{i}.Material}.Type,'Elastic Plastic Ductile Damage Model')    
@@ -106,6 +138,18 @@ Result(c,1)=k_D;
 end
 if Result_type==15
 Result(c,1)=d;
+end
+if Result_type==16
+Result(c,1)=k_Dt;
+end
+if Result_type==17
+Result(c,1)=k_Dc;
+end
+if Result_type==18
+Result(c,1)=d_t;
+end
+if Result_type==19
+Result(c,1)=d_c;
 end
 
 if strcmp(Model.Element{i,1}.Type,'wdg6')
@@ -195,14 +239,21 @@ end
 else
 ResultL= Result(I_Lines);
 cmap = colormap;
-c = round(1+(size(cmap,1)-1)*(ResultL - min(Result))/(max(Result)-min(Result)));
-if isnan(c); c=round(1+(size(cmap,1)-1)/2)*ones(size(ResultL,1),1); end
-for j = 1:j_Lines
-line(X(Lines(j,:)),Y(Lines(j,:)),Z(Lines(j,:)),'color',cmap(c(j),:),'LineWidth',1);   
+if max(Result)==min(Result)
+    Color_Index=round((size(cmap,1)+1)/2)*ones(size(ResultL));
+else
+    Color_Index=round(1+(size(cmap,1)-1)* ...
+        (ResultL-min(Result))/(max(Result)-min(Result)));
 end
+for j = 1:j_Lines
+line(X(Lines(j,:)),Y(Lines(j,:)),Z(Lines(j,:)),'color',cmap(Color_Index(j),:),'LineWidth',1);   
+end  
 colorbar  
-caxis([ min(Result) , max(Result)]);
-if sum(abs(Result))==0; caxis([-1 1]); end
+if max(Result)==min(Result)
+    caxis([Result(1)-1,Result(1)+1]);
+else
+    caxis([min(Result),max(Result)]);
+end
 end
 end
 %--------------------------------------------------------------------------
