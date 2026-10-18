@@ -248,7 +248,10 @@ end
 if F_e <= tol_F
     d_t = 1-exp(-f_t*k_Dt/g_f);
     d_c = 0;
-    if d_t == 0
+    % Elastic effective-stress step: damage histories are frozen, so both
+    % damage derivatives are zero. Bypass the spectral split only when
+    % neither tensile nor compressive damage is present.
+    if d_t == 0 && d_c == 0
         s = s_eff;
         D = D_ep;
     else
